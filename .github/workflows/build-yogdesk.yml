@@ -68,6 +68,7 @@ jobs:
           version: ${{ env.LLVM_VERSION }}
 
       - name: Install flutter
+        id: flutter
         uses: subosito/flutter-action@v2
         with:
           channel: "stable"
@@ -75,12 +76,17 @@ jobs:
           architecture: x64
 
       - name: Replace engine with rustdesk custom flutter engine
+        shell: powershell
         run: |
           flutter doctor -v
           flutter precache --windows
           Invoke-WebRequest -Uri https://github.com/rustdesk/engine/releases/download/main/windows-x64-release.zip -OutFile windows-x64-release.zip
           Expand-Archive -Path windows-x64-release.zip -DestinationPath windows-x64-release
-          mv -Force windows-x64-release/*  C:/hostedtoolcache/windows/flutter/stable-${{ env.FLUTTER_VERSION }}-x64/bin/cache/artifacts/engine/windows-x64-release/
+          $flutterBin = (Get-Command flutter).Source
+          $flutterDir = Split-Path -Parent (Split-Path -Parent $flutterBin)
+          $dest = Join-Path $flutterDir "bin\cache\artifacts\engine\windows-x64-release"
+          if (-not (Test-Path $dest)) { New-Item -ItemType Directory -Path $dest -Force }
+          Copy-Item -Path "windows-x64-release\*" -Destination $dest -Recurse -Force
 
       - name: Patch flutter
         shell: bash
@@ -117,17 +123,18 @@ jobs:
         shell: bash
 
       - name: Build YOGDESK
+        shell: powershell
         run: |
           python3 .\build.py --portable --flutter --skip-portable-pack --hwcodec --vram
           if (Test-Path ./flutter/build/windows/x64/runner/Release) {
-            mv ./flutter/build/windows/x64/runner/Release ./yogdesk
+            Move-Item ./flutter/build/windows/x64/runner/Release ./yogdesk -Force
           }
 
           Invoke-WebRequest -Uri https://github.com/rustdesk-org/rdev/releases/download/usbmmidd_v2/usbmmidd_v2.zip -OutFile usbmmidd_v2.zip
-          Expand-Archive usbmmidd_v2.zip -DestinationPath .
+          Expand-Archive usbmmidd_v2.zip -DestinationPath . -Force
           Remove-Item -Path usbmmidd_v2\Win32 -Recurse -ErrorAction SilentlyContinue
           Remove-Item -Path "usbmmidd_v2\deviceinstaller64.exe", "usbmmidd_v2\deviceinstaller.exe", "usbmmidd_v2\usbmmidd.bat" -ErrorAction SilentlyContinue
-          mv -Force .\usbmmidd_v2 ./yogdesk -ErrorAction SilentlyContinue
+          Move-Item .\usbmmidd_v2 ./yogdesk -Force -ErrorAction SilentlyContinue
 
           try {
             Invoke-WebRequest -Uri https://github.com/rustdesk/hbb_common/releases/download/driver/rustdesk_printer_driver_v4-1.4.zip -OutFile rustdesk_printer_driver_v4-1.4.zip
