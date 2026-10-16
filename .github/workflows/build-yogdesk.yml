@@ -1,0 +1,163 @@
+name: Build YOGDESK Windows
+
+on:
+  workflow_dispatch:
+
+env:
+  SCITER_RUST_VERSION: "1.75"
+  RUST_VERSION: "1.75"
+  LLVM_VERSION: "15.0.6"
+  FLUTTER_VERSION: "3.24.5"
+  VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
+  VCPKG_COMMIT_ID: "9e593bb18ea69cc5095e012465dcd675a822ed0d"
+  VERSION: "1.5.1"
+  UPLOAD_ARTIFACT: "true"
+
+jobs:
+  generate-bridge:
+    uses: ./.github/workflows/bridge.yml
+
+  build-RustDeskTempTopMostWindow:
+    uses: ./.github/workflows/third-party-RustDeskTempTopMostWindow.yml
+    with:
+      upload-artifact: true
+      target: windows-2022
+      configuration: Release
+      platform: x64
+      target_version: Windows10
+
+  build-for-windows-flutter:
+    name: Build YOGDESK Windows x64
+    needs: [build-RustDeskTempTopMostWindow, generate-bridge]
+    runs-on: windows-2022
+    steps:
+      - name: Export GitHub Actions cache environment variables
+        uses: actions/github-script@v6
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+
+      - name: Checkout source code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Apply Rebranding to YOGDESK
+        shell: bash
+        run: |
+          sed -i 's/pub static ref APP_NAME: RwLock<String> = RwLock::new("RustDesk".to_owned());/pub static ref APP_NAME: RwLock<String> = RwLock::new("YOGDESK".to_owned());/g' libs/hbb_common/src/config.rs || true
+          sed -i 's/"RustDesk"/"YOGDESK"/g' libs/hbb_common/src/config.rs || true
+          sed -i 's/set(BINARY_NAME "rustdesk")/set(BINARY_NAME "yogdesk")/g' flutter/windows/CMakeLists.txt || true
+          sed -i 's/project(rustdesk LANGUAGES CXX)/project(yogdesk LANGUAGES CXX)/g' flutter/windows/CMakeLists.txt || true
+          sed -i 's/VALUE "ProductName", "RustDesk"/VALUE "ProductName", "YOGDESK"/g' flutter/windows/runner/Runner.rc || true
+          sed -i 's/VALUE "InternalName", "rustdesk"/VALUE "InternalName", "yogdesk"/g' flutter/windows/runner/Runner.rc || true
+          sed -i 's/VALUE "OriginalFilename", "rustdesk.exe"/VALUE "OriginalFilename", "yogdesk.exe"/g' flutter/windows/runner/Runner.rc || true
+          sed -i 's/VALUE "FileDescription", "RustDesk Remote Desktop"/VALUE "FileDescription", "YOGDESK Remote Desktop"/g' flutter/windows/runner/Runner.rc || true
+          sed -i "s/hbb_name = 'rustdesk'/hbb_name = 'yogdesk'/g" build.py || true
+
+      - name: Restore bridge files
+        uses: actions/download-artifact@v4
+        with:
+          name: bridge-artifact
+          path: ./
+
+      - name: Install LLVM and Clang
+        uses: KyleMayes/install-llvm-action@v2
+        with:
+          version: ${{ env.LLVM_VERSION }}
+
+      - name: Install flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: "stable"
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          architecture: x64
+
+      - name: Replace engine with rustdesk custom flutter engine
+        run: |
+          flutter doctor -v
+          flutter precache --windows
+          Invoke-WebRequest -Uri https://github.com/rustdesk/engine/releases/download/main/windows-x64-release.zip -OutFile windows-x64-release.zip
+          Expand-Archive -Path windows-x64-release.zip -DestinationPath windows-x64-release
+          mv -Force windows-x64-release/*  C:/hostedtoolcache/windows/flutter/stable-${{ env.FLUTTER_VERSION }}-x64/bin/cache/artifacts/engine/windows-x64-release/
+
+      - name: Patch flutter
+        shell: bash
+        run: |
+          cp .github/patches/flutter_3.24.4_dropdown_menu_enableFilter.diff $(dirname $(dirname $(which flutter)))
+          cd $(dirname $(dirname $(which flutter)))
+          if [[ "3.24.5" == ${{env.FLUTTER_VERSION}} ]]; then
+            git apply flutter_3.24.4_dropdown_menu_enableFilter.diff
+          fi
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.SCITER_RUST_VERSION }}
+          targets: x86_64-pc-windows-msvc
+          components: "rustfmt"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: windows-2022
+
+      - name: Setup vcpkg with Github Actions binary cache
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgDirectory: C:\vcpkg
+          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
+          doNotCache: false
+
+      - name: Install vcpkg dependencies
+        env:
+          VCPKG_DEFAULT_HOST_TRIPLET: x64-windows-static
+        run: |
+          $VCPKG_ROOT/vcpkg install --triplet x64-windows-static --x-install-root="$VCPKG_ROOT/installed"
+        shell: bash
+
+      - name: Build YOGDESK
+        run: |
+          python3 .\build.py --portable --flutter --skip-portable-pack --hwcodec --vram
+          if (Test-Path ./flutter/build/windows/x64/runner/Release) {
+            mv ./flutter/build/windows/x64/runner/Release ./yogdesk
+          }
+
+          Invoke-WebRequest -Uri https://github.com/rustdesk-org/rdev/releases/download/usbmmidd_v2/usbmmidd_v2.zip -OutFile usbmmidd_v2.zip
+          Expand-Archive usbmmidd_v2.zip -DestinationPath .
+          Remove-Item -Path usbmmidd_v2\Win32 -Recurse -ErrorAction SilentlyContinue
+          Remove-Item -Path "usbmmidd_v2\deviceinstaller64.exe", "usbmmidd_v2\deviceinstaller.exe", "usbmmidd_v2\usbmmidd.bat" -ErrorAction SilentlyContinue
+          mv -Force .\usbmmidd_v2 ./yogdesk -ErrorAction SilentlyContinue
+
+          try {
+            Invoke-WebRequest -Uri https://github.com/rustdesk/hbb_common/releases/download/driver/rustdesk_printer_driver_v4-1.4.zip -OutFile rustdesk_printer_driver_v4-1.4.zip
+            Invoke-WebRequest -Uri https://github.com/rustdesk/hbb_common/releases/download/driver/printer_driver_adapter.zip -OutFile printer_driver_adapter.zip
+            Expand-Archive rustdesk_printer_driver_v4-1.4.zip -DestinationPath .\yogdesk -Force
+            Expand-Archive printer_driver_adapter.zip -DestinationPath .\yogdesk -Force
+          } catch {
+            Write-Host "Printer driver download skipped: $_"
+          }
+
+      - name: Download RustDeskTempTopMostWindow artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: topmostwindow-artifacts-x64
+          path: "./yogdesk"
+
+      - name: Build self-extracted executable
+        shell: bash
+        run: |
+          sed -i '/dpiAware/d' res/manifest.xml || true
+          pushd ./libs/portable
+          pip3 install -r requirements.txt
+          python3 ./generate.py -f ../../yogdesk/ -o . -e ../../yogdesk/yogdesk.exe || python3 ./generate.py -f ../../yogdesk/ -o . -e ../../yogdesk/rustdesk.exe || true
+          popd
+          mkdir -p ./Output
+          cp ./target/release/*portable*.exe ./Output/YOGDESK-portable.exe || true
+          cp -r ./yogdesk ./Output/
+
+      - name: Upload YOGDESK Build Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: YOGDESK-Windows-x64
+          path: Output/
